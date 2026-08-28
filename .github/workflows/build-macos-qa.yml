@@ -19,7 +19,7 @@ jobs:
     env:
       CI: 'true'
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-      EXPECTED_SOURCE_COMMIT: '911b2fd0f9dd2503ecac00526def77db2e5f90a6'
+      EXPECTED_SOURCE_COMMIT: 'b9d9b304ae18fd73b71fcc4b8fdc02a557b50e22'
       SPLITTER_OFFLINE: '1'
       SPLITTER_ENGINE_VENV: engine/.venv-arm64
       SPLITTER_PACKAGING_FIXTURE: engine/tests/fixtures/semantic_product_ad.webp
