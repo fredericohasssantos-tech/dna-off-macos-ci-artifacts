@@ -1,4 +1,4 @@
-name: Build encrypted macOS 12 Intel QA installer
+name: Build encrypted macOS Tahoe M1 installer
 
 on:
   workflow_dispatch:
@@ -12,21 +12,15 @@ concurrency:
 
 jobs:
   build:
-    name: macOS 12 Intel (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    name: macOS Tahoe / Apple Silicon arm64
+    runs-on: macos-26
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: macos-15-intel
 
     env:
       CI: 'true'
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       SPLITTER_OFFLINE: '1'
-      SPLITTER_ENGINE_VENV: engine/.venv-${{ matrix.arch }}
+      SPLITTER_ENGINE_VENV: engine/.venv-arm64
       MACOSX_DEPLOYMENT_TARGET: '12.0'
 
     steps:
@@ -37,13 +31,13 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22.14.0
-          architecture: ${{ matrix.arch }}
+          architecture: arm64
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12.10'
-          architecture: ${{ matrix.arch }}
+          architecture: arm64
 
       - name: Decrypt private source in the ephemeral runner
         env:
@@ -59,8 +53,10 @@ jobs:
         working-directory: source
         shell: bash
         run: |
-          node -e "if (process.platform !== 'darwin' || process.arch !== '${{ matrix.arch }}') process.exit(1)"
-          python -c "import platform,sys; expected='${{ matrix.arch }}'; actual={'x86_64':'x64','arm64':'arm64'}.get(platform.machine().lower()); assert sys.platform == 'darwin' and sys.version_info[:2] == (3,12) and actual == expected, (sys.platform, platform.python_version(), actual, expected)"
+          test "$(uname -m)" = arm64
+          node -e "if (process.platform !== 'darwin' || process.arch !== 'arm64') process.exit(1)"
+          python -c "import platform,sys; assert sys.platform == 'darwin' and sys.version_info[:2] == (3,12) and platform.machine().lower() == 'arm64', (sys.platform, platform.python_version(), platform.machine())"
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 26
           sw_vers
 
       - name: Install application dependencies
@@ -71,15 +67,15 @@ jobs:
         working-directory: source
         env:
           SPLITTER_ENGINE_PYTHON: python3
-        run: npm run engine:setup:mac:${{ matrix.arch }}
+        run: npm run engine:setup:mac:arm64
 
       - name: Select native engine Python
         working-directory: source
         shell: bash
         run: |
-          engine_python="$GITHUB_WORKSPACE/source/engine/.venv-${{ matrix.arch }}/bin/python"
+          engine_python="$GITHUB_WORKSPACE/source/engine/.venv-arm64/bin/python"
           test -x "$engine_python"
-          "$engine_python" -c "import platform,sys; expected='${{ matrix.arch }}'; actual={'x86_64':'x64','arm64':'arm64'}.get(platform.machine().lower()); assert sys.version_info[:2] == (3,12) and actual == expected, (platform.python_version(), actual, expected)"
+          "$engine_python" -c "import platform,sys; assert sys.version_info[:2] == (3,12) and platform.machine().lower() == 'arm64', (platform.python_version(), platform.machine())"
           echo "SPLITTER_ENGINE_PYTHON=$engine_python" >> "$GITHUB_ENV"
 
       - name: Run source and contract checks
@@ -92,38 +88,42 @@ jobs:
           npm run test:integration
           npm run verify:offline
 
-      - name: Build and test mounted DMG
+      - name: Build and test installed locally signed DMG
         working-directory: source
-        run: npm run dist:mac:${{ matrix.arch }}
+        run: npm run dist:mac:arm64
 
-      - name: Confirm QA-only status and create checksum
+      - name: Confirm local signature and create checksum
         working-directory: source
         shell: bash
         run: |
           product_name="$(node -p 'require("./package.json").desktopName')"
           version="$(node -p 'require("./package.json").version')"
-          dmg="${product_name}-${version}-macOS-${{ matrix.arch }}.dmg"
+          dmg="${product_name}-${version}-macOS-arm64.dmg"
           test -f "release/${dmg}"
-          if /usr/bin/codesign --verify --strict "release/${dmg}" >/dev/null 2>&1; then
-            echo 'The QA DMG unexpectedly has a valid code signature.' >&2
+          /usr/bin/codesign --verify --strict --verbose=4 "release/${dmg}"
+          signature="$(/usr/bin/codesign -dv --verbose=4 "release/${dmg}" 2>&1)"
+          printf '%s\n' "$signature" | grep -q '^Signature=adhoc$'
+          if printf '%s\n' "$signature" | grep -q '^Authority='; then
+            echo 'The local QA DMG unexpectedly contains a certificate authority.' >&2
             exit 1
           fi
           if /usr/bin/xcrun stapler validate "release/${dmg}" >/dev/null 2>&1; then
-            echo 'The QA DMG unexpectedly has a notarization ticket.' >&2
+            echo 'The local QA DMG unexpectedly has an Apple notarization ticket.' >&2
             exit 1
           fi
           cd release
           shasum -a 256 "${dmg}" > "${dmg}.sha256"
           printf '%s\n' \
-            'QA INSTALLER — UNSIGNED AND NOT NOTARIZED' \
-            'Built and runtime-tested on a native GitHub-hosted Mac.' \
-            'Intel x64 build targeting macOS 12.0; intended for Monterey 12.7.6 or newer.' \
-            'Gatekeeper may require using Finder > right-click > Open.' \
-            > "QA-ONLY-${{ matrix.arch }}.txt"
+            'LOCAL QA INSTALLER — AD-HOC SIGNED, NOT APPLE-NOTARIZED' \
+            'Built natively and runtime-tested on a GitHub-hosted Apple Silicon Mac running macOS Tahoe.' \
+            'The app, sidecar and every Mach-O are thin arm64 and signature-verified.' \
+            'Se o Gatekeeper bloquear a primeira abertura, tente uma vez e use Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.' \
+            > 'LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt'
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp "${dmg}" "${dmg}.sha256" "QA-ONLY-${{ matrix.arch }}.txt" "$GITHUB_WORKSPACE/artifacts/"
+          cp "${dmg}" "${dmg}.sha256" 'LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt' "$GITHUB_WORKSPACE/artifacts/"
 
       - name: Remove decrypted source before artifact upload
+        if: always()
         working-directory: ${{ github.workspace }}
         shell: bash
         run: rm -rf source source.tar.gz
@@ -131,11 +131,11 @@ jobs:
       - name: Upload tested installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dna-off-macos-12-qa-unsigned-${{ matrix.arch }}
+          name: dna-off-macos-tahoe-m1-local-signed-arm64
           path: |
-            artifacts/*-macOS-${{ matrix.arch }}.dmg
-            artifacts/*-macOS-${{ matrix.arch }}.dmg.sha256
-            artifacts/QA-ONLY-${{ matrix.arch }}.txt
+            artifacts/*-macOS-arm64.dmg
+            artifacts/*-macOS-arm64.dmg.sha256
+            artifacts/LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
