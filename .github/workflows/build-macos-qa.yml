@@ -1,0 +1,141 @@
+name: Build encrypted macOS QA installers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: encrypted-macos-qa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+
+    env:
+      CI: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      SPLITTER_OFFLINE: '1'
+      SPLITTER_ENGINE_VENV: engine/.venv-${{ matrix.arch }}
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+
+    steps:
+      - name: Check out encrypted build payload
+        uses: actions/checkout@v7
+
+      - name: Decrypt private source in the ephemeral runner
+        env:
+          SOURCE_PASSPHRASE: ${{ secrets.SOURCE_PASSPHRASE }}
+        shell: bash
+        run: |
+          test -n "$SOURCE_PASSPHRASE"
+          node crypt-source.mjs decrypt source.tar.gz.enc source.tar.gz
+          mkdir source
+          tar -xzf source.tar.gz -C source
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22.14.0
+          architecture: ${{ matrix.arch }}
+          cache: npm
+          cache-dependency-path: source/package-lock.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
+          cache: pip
+          cache-dependency-path: |
+            source/engine/requirements.txt
+            source/engine/requirements-ml.txt
+
+      - name: Confirm native runner architecture
+        working-directory: source
+        shell: bash
+        run: |
+          node -e "if (process.platform !== 'darwin' || process.arch !== '${{ matrix.arch }}') process.exit(1)"
+          python -c "import platform,sys; expected='${{ matrix.arch }}'; actual={'x86_64':'x64','arm64':'arm64'}.get(platform.machine().lower()); assert sys.platform == 'darwin' and sys.version_info[:2] == (3,12) and actual == expected, (sys.platform, platform.python_version(), actual, expected)"
+          sw_vers
+
+      - name: Install application dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Prepare native offline engine
+        working-directory: source
+        env:
+          SPLITTER_ENGINE_PYTHON: python3
+        run: npm run engine:setup:mac:${{ matrix.arch }}
+
+      - name: Select native engine Python
+        working-directory: source
+        shell: bash
+        run: |
+          engine_python="$GITHUB_WORKSPACE/source/engine/.venv-${{ matrix.arch }}/bin/python"
+          test -x "$engine_python"
+          "$engine_python" -c "import platform,sys; expected='${{ matrix.arch }}'; actual={'x86_64':'x64','arm64':'arm64'}.get(platform.machine().lower()); assert sys.version_info[:2] == (3,12) and actual == expected, (platform.python_version(), actual, expected)"
+          echo "SPLITTER_ENGINE_PYTHON=$engine_python" >> "$GITHUB_ENV"
+
+      - name: Run source and contract checks
+        working-directory: source
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run test:engine
+          npm run test:integration
+          npm run verify:offline
+
+      - name: Build and test mounted DMG
+        working-directory: source
+        run: npm run dist:mac:${{ matrix.arch }}
+
+      - name: Confirm QA-only status and create checksum
+        working-directory: source
+        shell: bash
+        run: |
+          product_name="$(node -p 'require("./package.json").desktopName')"
+          version="$(node -p 'require("./package.json").version')"
+          dmg="${product_name}-${version}-macOS-${{ matrix.arch }}.dmg"
+          test -f "release/${dmg}"
+          if /usr/bin/codesign --verify --strict "release/${dmg}" >/dev/null 2>&1; then
+            echo 'The QA DMG unexpectedly has a valid code signature.' >&2
+            exit 1
+          fi
+          if /usr/bin/xcrun stapler validate "release/${dmg}" >/dev/null 2>&1; then
+            echo 'The QA DMG unexpectedly has a notarization ticket.' >&2
+            exit 1
+          fi
+          cd release
+          shasum -a 256 "${dmg}" > "${dmg}.sha256"
+          printf '%s\n' \
+            'QA INSTALLER — UNSIGNED AND NOT NOTARIZED' \
+            'Built and runtime-tested on a native GitHub-hosted Mac.' \
+            'Gatekeeper may require using Finder > right-click > Open.' \
+            > "QA-ONLY-${{ matrix.arch }}.txt"
+
+      - name: Upload tested installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: dna-off-macos-qa-unsigned-${{ matrix.arch }}
+          path: |
+            source/release/*-macOS-${{ matrix.arch }}.dmg
+            source/release/*-macOS-${{ matrix.arch }}.dmg.sha256
+            source/release/QA-ONLY-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
