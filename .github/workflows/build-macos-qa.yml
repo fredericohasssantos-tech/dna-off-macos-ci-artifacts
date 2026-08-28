@@ -33,7 +33,19 @@ jobs:
 
     steps:
       - name: Check out encrypted build payload
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.14.0
+          architecture: ${{ matrix.arch }}
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.arch }}
 
       - name: Decrypt private source in the ephemeral runner
         env:
@@ -44,24 +56,6 @@ jobs:
           node crypt-source.mjs decrypt source.tar.gz.enc source.tar.gz
           mkdir source
           tar -xzf source.tar.gz -C source
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22.14.0
-          architecture: ${{ matrix.arch }}
-          cache: npm
-          cache-dependency-path: source/package-lock.json
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-          architecture: ${{ matrix.arch }}
-          cache: pip
-          cache-dependency-path: |
-            source/engine/requirements.txt
-            source/engine/requirements-ml.txt
 
       - name: Confirm native runner architecture
         working-directory: source
@@ -127,15 +121,22 @@ jobs:
             'Built and runtime-tested on a native GitHub-hosted Mac.' \
             'Gatekeeper may require using Finder > right-click > Open.' \
             > "QA-ONLY-${{ matrix.arch }}.txt"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "${dmg}" "${dmg}.sha256" "QA-ONLY-${{ matrix.arch }}.txt" "$GITHUB_WORKSPACE/artifacts/"
+
+      - name: Remove decrypted source before artifact upload
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: rm -rf source source.tar.gz
 
       - name: Upload tested installer
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dna-off-macos-qa-unsigned-${{ matrix.arch }}
           path: |
-            source/release/*-macOS-${{ matrix.arch }}.dmg
-            source/release/*-macOS-${{ matrix.arch }}.dmg.sha256
-            source/release/QA-ONLY-${{ matrix.arch }}.txt
+            artifacts/*-macOS-${{ matrix.arch }}.dmg
+            artifacts/*-macOS-${{ matrix.arch }}.dmg.sha256
+            artifacts/QA-ONLY-${{ matrix.arch }}.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
