@@ -1,4 +1,4 @@
-name: Build encrypted macOS QA installers
+name: Build encrypted macOS 12 Intel QA installer
 
 on:
   workflow_dispatch:
@@ -12,15 +12,13 @@ concurrency:
 
 jobs:
   build:
-    name: macOS ${{ matrix.arch }}
+    name: macOS 12 Intel (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
-            runner: macos-15
           - arch: x64
             runner: macos-15-intel
 
@@ -29,7 +27,7 @@ jobs:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       SPLITTER_OFFLINE: '1'
       SPLITTER_ENGINE_VENV: engine/.venv-${{ matrix.arch }}
-      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
 
     steps:
       - name: Check out encrypted build payload
@@ -44,7 +42,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
-          python-version: '3.12'
+          python-version: '3.12.10'
           architecture: ${{ matrix.arch }}
 
       - name: Decrypt private source in the ephemeral runner
@@ -119,6 +117,7 @@ jobs:
           printf '%s\n' \
             'QA INSTALLER — UNSIGNED AND NOT NOTARIZED' \
             'Built and runtime-tested on a native GitHub-hosted Mac.' \
+            'Intel x64 build targeting macOS 12.0; intended for Monterey 12.7.6 or newer.' \
             'Gatekeeper may require using Finder > right-click > Open.' \
             > "QA-ONLY-${{ matrix.arch }}.txt"
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
@@ -132,7 +131,7 @@ jobs:
       - name: Upload tested installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dna-off-macos-qa-unsigned-${{ matrix.arch }}
+          name: dna-off-macos-12-qa-unsigned-${{ matrix.arch }}
           path: |
             artifacts/*-macOS-${{ matrix.arch }}.dmg
             artifacts/*-macOS-${{ matrix.arch }}.dmg.sha256
