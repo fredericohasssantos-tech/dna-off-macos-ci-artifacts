@@ -4,10 +4,17 @@ This public repository contains only an authenticated, AES-256-GCM encrypted
 build payload. The application source is not published here. Decryption is
 available only to the GitHub Actions workflow through a repository secret.
 
-The current workflow artifact is a locally signed, unnotarized Apple Silicon
-(`arm64`) QA installer built and runtime-tested on macOS Tahoe. It contains a
-native thin ARM application and sidecar for the requested MacBook Air M1. It is
-not an Apple Developer ID/notarized production release.
+The personal workflow builds an unsigned DMG containing a locally/ad-hoc signed
+Apple Silicon (`arm64`) app. The app, Electron helpers, native frameworks and
+Python sidecar are runtime-tested as thin ARM64 code on macOS Tahoe, including
+the supplied real photo and its embedded SVG export. This personal artifact
+does not use Developer ID, notarization or a paid Apple account.
+
+Because Safari and messaging apps add macOS quarantine after download, an
+ad-hoc app requires one graphical owner approval on each Mac/build: try to open
+it, then use **System Settings → Privacy & Security → Open Anyway**. The DMG
+includes the same instructions in Portuguese. It should be downloaded directly
+in Safari on the target M1 rather than forwarded through WhatsApp.
 
 `build-macos-release.yml` is a separate, manually dispatched production path.
 It decrypts the source only inside the ephemeral Apple Silicon runner, invokes

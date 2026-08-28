@@ -1,4 +1,4 @@
-name: Build encrypted macOS Tahoe M1 installer
+name: Build encrypted personal macOS Tahoe M1 installer
 
 on:
   workflow_dispatch:
@@ -19,13 +19,23 @@ jobs:
     env:
       CI: 'true'
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      EXPECTED_SOURCE_COMMIT: '67855b5853aa505c7cb2f751e706d79236379258'
       SPLITTER_OFFLINE: '1'
       SPLITTER_ENGINE_VENV: engine/.venv-arm64
+      SPLITTER_PACKAGING_FIXTURE: engine/tests/fixtures/user_static_photo.jpg
       MACOSX_DEPLOYMENT_TARGET: '12.0'
 
     steps:
+      - name: Require main branch
+        shell: bash
+        run: test "$GITHUB_REF" = 'refs/heads/main'
+
       - name: Check out encrypted build payload
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Refuse a stale encrypted source snapshot
+        shell: bash
+        run: test "$(tr -d '\r\n' < SOURCE_COMMIT)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -88,39 +98,37 @@ jobs:
           npm run test:integration
           npm run verify:offline
 
-      - name: Build and test installed locally signed DMG
+      - name: Build and test installed personal M1 DMG
         working-directory: source
         run: npm run dist:mac:arm64
 
-      - name: Confirm local signature and create checksum
+      - name: Confirm personal container and create checksum
         working-directory: source
         shell: bash
         run: |
           product_name="$(node -p 'require("./package.json").desktopName')"
           version="$(node -p 'require("./package.json").version')"
-          dmg="${product_name}-${version}-macOS-arm64.dmg"
+          dmg="${product_name}-${version}-macOS-PESSOAL-arm64.dmg"
           test -f "release/${dmg}"
-          /usr/bin/codesign --verify --strict --verbose=4 "release/${dmg}"
-          signature="$(/usr/bin/codesign -dv --verbose=4 "release/${dmg}" 2>&1)"
-          printf '%s\n' "$signature" | grep -q '^Signature=adhoc$'
-          if printf '%s\n' "$signature" | grep -q '^Authority='; then
-            echo 'The local QA DMG unexpectedly contains a certificate authority.' >&2
+          /usr/bin/hdiutil verify "release/${dmg}"
+          if /usr/bin/codesign --verify --strict --verbose=4 "release/${dmg}" >/dev/null 2>&1; then
+            echo 'The personal DMG unexpectedly carries a distribution signature.' >&2
             exit 1
           fi
           if /usr/bin/xcrun stapler validate "release/${dmg}" >/dev/null 2>&1; then
-            echo 'The local QA DMG unexpectedly has an Apple notarization ticket.' >&2
+            echo 'The personal DMG unexpectedly has an Apple notarization ticket.' >&2
             exit 1
           fi
           cd release
           shasum -a 256 "${dmg}" > "${dmg}.sha256"
           printf '%s\n' \
-            'LOCAL QA INSTALLER — AD-HOC SIGNED, NOT APPLE-NOTARIZED' \
-            'Built natively and runtime-tested on a GitHub-hosted Apple Silicon Mac running macOS Tahoe.' \
-            'The app, sidecar and every Mach-O are thin arm64 and signature-verified.' \
-            'Se o Gatekeeper bloquear a primeira abertura, tente uma vez e use Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.' \
-            > 'LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt'
+            'INSTALADOR PESSOAL M1 — APP AD-HOC, SEM DEVELOPER ID E SEM NOTARIZAÇÃO' \
+            'O contêiner DMG é unsigned; o app, sidecar e todos os Mach-O são thin arm64 e foram verificados.' \
+            'O build testou a foto real, camadas, SVG, Finder e a fronteira esperada do Gatekeeper no macOS Tahoe.' \
+            'Baixe diretamente pelo Safari. Na primeira abertura use Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.' \
+            > 'USO-PESSOAL-M1-arm64.txt'
           mkdir -p "$GITHUB_WORKSPACE/artifacts"
-          cp "${dmg}" "${dmg}.sha256" 'LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt' "$GITHUB_WORKSPACE/artifacts/"
+          cp "${dmg}" "${dmg}.sha256" 'USO-PESSOAL-M1-arm64.txt' "$GITHUB_WORKSPACE/artifacts/"
 
       - name: Remove decrypted source before artifact upload
         if: always()
@@ -131,11 +139,11 @@ jobs:
       - name: Upload tested installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dna-off-macos-tahoe-m1-local-signed-arm64
+          name: dna-off-macos-tahoe-m1-personal-arm64
           path: |
-            artifacts/*-macOS-arm64.dmg
-            artifacts/*-macOS-arm64.dmg.sha256
-            artifacts/LOCAL-SIGNED-NOT-NOTARIZED-arm64.txt
+            artifacts/*-macOS-PESSOAL-arm64.dmg
+            artifacts/*-macOS-PESSOAL-arm64.dmg.sha256
+            artifacts/USO-PESSOAL-M1-arm64.txt
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
