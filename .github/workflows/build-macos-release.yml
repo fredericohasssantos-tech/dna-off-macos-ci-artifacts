@@ -1,0 +1,187 @@
+name: Build encrypted notarized macOS Tahoe M1 release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: encrypted-macos-release-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Developer ID + notarized M1 DMG
+    runs-on: macos-26
+    timeout-minutes: 360
+    environment: production-macos
+
+    env:
+      CI: 'true'
+      CSC_IDENTITY_AUTO_DISCOVERY: 'true'
+      EXPECTED_SOURCE_COMMIT: '7ad9ca1b72473d5a2788c173e23367d2c033f883'
+      SPLITTER_OFFLINE: '1'
+      SPLITTER_ENGINE_VENV: engine/.venv-arm64
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+
+    steps:
+      - name: Require protected main release ref
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF" != 'refs/heads/main' ]; then
+            echo '::error::Production releases are allowed only from refs/heads/main.'
+            exit 1
+          fi
+
+      - name: Check out encrypted build payload
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Refuse a stale encrypted source snapshot
+        shell: bash
+        run: |
+          test "$(tr -d '\r\n' < SOURCE_COMMIT)" = "$EXPECTED_SOURCE_COMMIT"
+
+      - name: Require production Apple credentials
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          missing=0
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Required production secret is missing: ${name}"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22.14.0
+          architecture: arm64
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12.10'
+          architecture: arm64
+
+      - name: Decrypt private source in the ephemeral runner
+        env:
+          SOURCE_PASSPHRASE: ${{ secrets.SOURCE_PASSPHRASE }}
+        shell: bash
+        run: |
+          test -n "$SOURCE_PASSPHRASE"
+          node crypt-source.mjs decrypt source.tar.gz.enc source.tar.gz
+          mkdir source
+          tar -xzf source.tar.gz -C source
+
+      - name: Confirm native Tahoe Apple Silicon runner
+        working-directory: source
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          node -e "if (process.platform !== 'darwin' || process.arch !== 'arm64') process.exit(1)"
+          python -c "import platform,sys; assert sys.platform == 'darwin' and sys.version_info[:2] == (3,12) and platform.machine().lower() == 'arm64', (sys.platform, platform.python_version(), platform.machine())"
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 26
+          sw_vers
+
+      - name: Install application dependencies
+        working-directory: source
+        run: npm ci
+
+      - name: Prepare native offline engine
+        working-directory: source
+        env:
+          SPLITTER_ENGINE_PYTHON: python3
+        run: npm run engine:setup:mac:arm64
+
+      - name: Select native engine Python
+        working-directory: source
+        shell: bash
+        run: |
+          engine_python="$GITHUB_WORKSPACE/source/engine/.venv-arm64/bin/python"
+          test -x "$engine_python"
+          "$engine_python" -c "import platform,sys; assert sys.version_info[:2] == (3,12) and platform.machine().lower() == 'arm64', (platform.python_version(), platform.machine())"
+          echo "SPLITTER_ENGINE_PYTHON=$engine_python" >> "$GITHUB_ENV"
+
+      - name: Run source and contract checks
+        working-directory: source
+        run: |
+          npm run lint
+          npm run typecheck
+          npm test
+          npm run test:engine
+          npm run test:integration
+          npm run verify:offline
+
+      - name: Build, notarize and test installed M1 DMG
+        working-directory: source
+        shell: bash
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          api_key_path="$RUNNER_TEMP/dna-off-notary-api-key.p8"
+          cleanup_api_key() {
+            rm -f "$api_key_path"
+          }
+          trap cleanup_api_key EXIT HUP INT TERM
+
+          umask 077
+          printf '%s' "$APPLE_API_KEY_P8" > "$api_key_path"
+          test -s "$api_key_path"
+          grep -q '^-----BEGIN PRIVATE KEY-----$' "$api_key_path"
+          grep -q '^-----END PRIVATE KEY-----$' "$api_key_path"
+          export APPLE_API_KEY="$api_key_path"
+          npm run dist:mac:release:arm64
+
+      - name: Recheck distributable and create checksum
+        working-directory: source
+        shell: bash
+        run: |
+          product_name="$(node -p 'require("./package.json").desktopName')"
+          version="$(node -p 'require("./package.json").version')"
+          dmg="${product_name}-${version}-macOS-arm64.dmg"
+          test -f "release/${dmg}"
+          /usr/bin/codesign --verify --strict --verbose=4 "release/${dmg}"
+          signature="$(/usr/bin/codesign -dv --verbose=4 "release/${dmg}" 2>&1)"
+          printf '%s\n' "$signature" | grep -q '^Authority=Developer ID Application:'
+          printf '%s\n' "$signature" | grep -q '^Timestamp='
+          if printf '%s\n' "$signature" | grep -q '^Timestamp=none$'; then
+            echo 'The release DMG has no secure timestamp.' >&2
+            exit 1
+          fi
+          /usr/bin/xcrun stapler validate "release/${dmg}"
+          /usr/sbin/spctl --assess --type open --context context:primary-signature --verbose=4 "release/${dmg}"
+          shasum -a 256 "release/${dmg}" > "release/${dmg}.sha256"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "release/${dmg}" "release/${dmg}.sha256" "$GITHUB_WORKSPACE/artifacts/"
+
+      - name: Remove decrypted source and temporary credentials
+        if: always()
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          rm -rf source source.tar.gz
+          rm -f "$RUNNER_TEMP/dna-off-notary-api-key.p8"
+
+      - name: Upload only the accepted notarized installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dna-off-macos-tahoe-m1-notarized-arm64
+          path: |
+            artifacts/*-macOS-arm64.dmg
+            artifacts/*-macOS-arm64.dmg.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
